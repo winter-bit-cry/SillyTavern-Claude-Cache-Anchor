@@ -7,7 +7,10 @@ import { IGNORE_SYMBOL } from '/scripts/constants.js';
 import { isTrueBoolean } from '/scripts/utils.js';
 
 const SETTINGS_KEY = 'claudeCacheAnchor';
-const MODULE_NAME = 'third-party/Claude-Cache-Anchor';
+const MODULE_NAME = (() => {
+    const match = import.meta.url.match(/\/scripts\/extensions\/(.+)\/index\.js(?:\?.*)?$/);
+    return match ? decodeURIComponent(match[1]) : 'third-party/SillyTavern-Claude-Cache-Anchor';
+})();
 
 const ANCHOR_MARKER = '<!-- ST_CLAUDE_CACHE_ANCHOR -->';
 const CACHE_TTL_OPTIONS = ['1h', '5m'];
