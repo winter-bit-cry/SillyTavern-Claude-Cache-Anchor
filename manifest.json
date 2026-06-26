@@ -1,0 +1,10 @@
+{
+    "display_name": "Claude Cache Anchor",
+    "loading_order": 26,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "author": "Codex",
+    "version": "0.2.0",
+    "homePage": "https://github.com/winter-bit-cry/SillyTavern-Claude-Cache-Anchor"
+}
