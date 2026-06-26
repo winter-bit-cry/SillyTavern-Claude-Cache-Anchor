@@ -2,13 +2,34 @@
 
 SillyTavern extension plus a tiny local backend bridge for placing Anthropic Claude `cache_control` at a semantic prompt point.
 
+## Important limitation
+
+SillyTavern third-party extensions run in the browser. They can edit the prepared prompt, but they cannot directly change the final Claude API payload that the SillyTavern backend sends.
+
+For this extension to actually add Claude `cache_control`, install the frontend extension and apply the bundled backend patch. Without the backend patch, the extension can only place an internal marker and will not enable prompt caching by itself.
+
 ## What this does
 
 - Hooks `CHAT_COMPLETION_PROMPT_READY`.
 - Adds an internal marker to the selected prompt message.
 - The backend bridge removes the marker and adds Anthropic `cache_control` to that content block.
 - Lets the extension settings choose Claude cache TTL: `5m` or `1h`.
-- Adds an OpenAI-compatible fallback for Claude/GProxy/gcli endpoints, including stable `session_id`.
+
+## Install
+
+Install the extension in SillyTavern using this Git URL:
+
+```text
+https://github.com/winter-bit-cry/SillyTavern-Claude-Cache-Anchor
+```
+
+Then apply the backend bridge from the SillyTavern root:
+
+```bash
+git apply data/default-user/extensions/Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
+```
+
+If your SillyTavern profile or extension folder is different, adjust the path accordingly. Restart SillyTavern after applying the patch.
 
 ## Recommended setup
 
@@ -43,9 +64,6 @@ Look for Anthropic usage fields in the response or logs:
 
 - `cache_creation_input_tokens`: tokens written into cache
 - `cache_read_input_tokens`: tokens read from cache
-- `cache_write_tokens`: OpenAI-compatible/GProxy cache write tokens
-- `cached_tokens`: OpenAI-compatible/GProxy cache read tokens
-
 The first request should usually show creation. A later request with the same cached prefix should show reads.
 
 ## Backend bridge
