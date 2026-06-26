@@ -1,0 +1,249 @@
+﻿diff --git a/src/endpoints/backends/chat-completions.js b/src/endpoints/backends/chat-completions.js
+index e0ac890dc..32dd6e620 100644
+--- a/src/endpoints/backends/chat-completions.js
++++ b/src/endpoints/backends/chat-completions.js
+@@ -1,5 +1,7 @@
+ import process from 'node:process';
+ import util from 'node:util';
++import fs from 'node:fs';
++import path from 'node:path';
+ import express from 'express';
+ import fetch from 'node-fetch';
+ import urlJoin from 'url-join';
+@@ -12,6 +14,7 @@ import {
+     OPENAI_REASONING_EFFORT_MAP,
+     OPENAI_REASONING_EFFORT_MODELS,
+     OPENROUTER_HEADERS,
++    SETTINGS_FILE,
+     VERTEX_SAFETY,
+     ZAI_ENDPOINT,
+ } from '../../constants.js';
+@@ -68,6 +71,173 @@ const API_MAKERSUITE = 'https://generativelanguage.googleapis.com';
+ const API_VERTEX_AI = 'https://us-central1-aiplatform.googleapis.com';
+ const API_AI21 = 'https://api.ai21.com/studio/v1';
+ const API_ELECTRONHUB = 'https://api.electronhub.ai/v1';
++const ST_CLAUDE_CACHE_ANCHOR = '<!-- ST_CLAUDE_CACHE_ANCHOR -->';
++const ST_CLAUDE_CACHE_RECENT_MESSAGES = 5;
++const ST_CLAUDE_CACHE_DEFAULT_TTL = '1h';
++const ST_CLAUDE_CACHE_TTLS = new Set(['5m', '1h']);
++
++function normalizeClaudeCacheTTL(value, fallback = ST_CLAUDE_CACHE_DEFAULT_TTL) {
++    const ttl = String(value || '').trim();
++    return ST_CLAUDE_CACHE_TTLS.has(ttl) ? ttl : fallback;
++}
++
++function readClaudeCacheAnchorSettings(request) {
++    try {
++        const settingsPath = path.join(request.user.directories.root, SETTINGS_FILE);
++        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
++        return settings?.extension_settings?.claudeCacheAnchor || {};
++    } catch {
++        return {};
++    }
++}
++
++function getClaudeCacheTTL(request) {
++    const extensionTTL = readClaudeCacheAnchorSettings(request).cacheTTL;
++    if (extensionTTL) {
++        return normalizeClaudeCacheTTL(extensionTTL);
++    }
++
++    const configTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
++    return normalizeClaudeCacheTTL(configTTL);
++}
++
++function getClaudeCacheRecentMessages(request) {
++    const recentMessages = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentMessages ?? ''), 10);
++    return Number.isInteger(recentMessages) && recentMessages > 0
++        ? recentMessages
++        : ST_CLAUDE_CACHE_RECENT_MESSAGES;
++}
++
++function buildClaudeCacheControl(cacheTTL, includeTTL = true) {
++    return includeTTL
++        ? { type: 'ephemeral', ttl: cacheTTL }
++        : { type: 'ephemeral' };
++}
++
++function markClaudeCacheControlOnMessage(message, cacheTTL, reason, includeTTL = true) {
++    if (!message || typeof message !== 'object') {
++        return false;
++    }
++
++    if (typeof message.content === 'string' && message.content.trim()) {
++        message.content = [{
++            type: 'text',
++            text: message.content,
++            cache_control: buildClaudeCacheControl(cacheTTL, includeTTL),
++        }];
++        console.info(`[Claude Cache Anchor] Applied fallback cache_control ttl=${cacheTTL} to role=${message.role || 'unknown'}, reason=${reason}.`);
++        return true;
++    }
++
++    if (!Array.isArray(message.content)) {
++        return false;
++    }
++
++    for (let i = message.content.length - 1; i >= 0; i--) {
++        const block = message.content[i];
++        if (!block || block.type !== 'text' || typeof block.text !== 'string' || !block.text.trim()) {
++            continue;
++        }
++
++        block.cache_control = buildClaudeCacheControl(cacheTTL, includeTTL);
++        console.info(`[Claude Cache Anchor] Applied fallback cache_control ttl=${cacheTTL} to role=${message.role || 'unknown'}, reason=${reason}.`);
++        return true;
++    }
++
++    return false;
++}
++
++function applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, recentMessages = ST_CLAUDE_CACHE_RECENT_MESSAGES, includeTTL = true) {
++    if (!Array.isArray(requestBody.messages) || requestBody.messages.length === 0) {
++        return false;
++    }
++
++    const targetStart = requestBody.messages.length > recentMessages
++        ? requestBody.messages.length - recentMessages - 1
++        : requestBody.messages.length - 1;
++
++    for (let i = targetStart; i >= 0; i--) {
++        if (markClaudeCacheControlOnMessage(requestBody.messages[i], cacheTTL, `before-last-${recentMessages}-messages`, includeTTL)) {
++            console.info(`[Claude Cache Anchor] Fallback inspected messages=${requestBody.messages.length}, targetIndex=${i}.`);
++            return true;
++        }
++    }
++
++    console.warn(`[Claude Cache Anchor] Fallback found no text message to mark. messages=${requestBody.messages.length}.`);
++    return false;
++}
++
++function shouldApplyClaudeCacheFallback(request, requestBody) {
++    if (!Array.isArray(requestBody?.messages)) {
++        return false;
++    }
++
++    if (![CHAT_COMPLETION_SOURCES.OPENAI, CHAT_COMPLETION_SOURCES.CUSTOM].includes(request.body.chat_completion_source)) {
++        return false;
++    }
++
++    const model = String(requestBody.model || request.body.model || '').toLowerCase();
++    const targetUrl = String(request.body.custom_url || request.body.reverse_proxy || '').toLowerCase();
++
++    return model.includes('claude')
++        || targetUrl.includes('claude')
++        || targetUrl.includes('gcli')
++        || targetUrl.includes('anthropic');
++}
++
++function getClaudeCacheSessionId(request) {
++    const source = [
++        request.body.group_names?.join('-'),
++        request.body.char_name,
++        request.body.user_name,
++        request.body.model,
++    ].filter(Boolean).join('|') || 'default';
++    return `sillytavern-${Buffer.from(source).toString('base64url').slice(0, 48)}`;
++}
++
++function applyClaudeCacheAnchorToContentBlocks(blocks, cacheTTL, includeTTL = true) {
++    if (!Array.isArray(blocks)) {
++        return false;
++    }
++
++    let applied = false;
++
++    for (const block of blocks) {
++        if (!block || block.type !== 'text' || typeof block.text !== 'string') {
++            continue;
++        }
++
++        if (!block.text.includes(ST_CLAUDE_CACHE_ANCHOR)) {
++            continue;
++        }
++
++        const originalLength = block.text.length;
++        block.text = block.text.split(ST_CLAUDE_CACHE_ANCHOR).join('').trimEnd() || '\u200b';
++        block.cache_control = buildClaudeCacheControl(cacheTTL, includeTTL);
++        console.info(`[Claude Cache Anchor] Applied cache_control ttl=${cacheTTL} to text block, textLength=${originalLength}.`);
++        applied = true;
++    }
++
++    return applied;
++}
++
++function applyClaudeCacheAnchor(requestBody, cacheTTL, includeTTL = true) {
++    let applied = false;
++
++    if (applyClaudeCacheAnchorToContentBlocks(requestBody.system, cacheTTL, includeTTL)) {
++        applied = true;
++    }
++
++    if (Array.isArray(requestBody.messages)) {
++        for (const message of requestBody.messages) {
++            if (applyClaudeCacheAnchorToContentBlocks(message?.content, cacheTTL, includeTTL)) {
++                applied = true;
++            }
++        }
++    }
++
++    return applied;
++}
+ const API_NANOGPT = 'https://nano-gpt.com/api/v1';
+ const API_DEEPSEEK = 'https://api.deepseek.com/beta';
+ const API_XAI = 'https://api.x.ai/v1';
+@@ -163,7 +333,7 @@ async function sendClaudeRequest(request, response) {
+         const useThinking = /^claude-(3-7|opus-4|sonnet-4|haiku-4-5)/.test(request.body.model);
+         const useWebSearch = /^claude-(3-5|3-7|opus-4|sonnet-4|haiku-4-5)/.test(request.body.model) && Boolean(request.body.enable_web_search);
+         const isLimitedSampling = /^claude-(opus-4-1|sonnet-4-5|haiku-4-5)/.test(request.body.model);
+-        const cacheTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
++        const cacheTTL = getClaudeCacheTTL(request);
+         let fixThinkingPrefill = false;
+         // Add custom stop sequences
+         const stopSequences = [];
+@@ -227,7 +397,9 @@ async function sendClaudeRequest(request, response) {
+             cachingAtDepthForClaude(convertedPrompt.messages, cachingAtDepth, cacheTTL);
+         }
+ 
+-        if (enableSystemPromptCache || cachingAtDepth !== -1) {
++        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);
++
++        if (enableSystemPromptCache || cachingAtDepth !== -1 || hasManualCacheAnchor) {
+             betaHeaders.push('prompt-caching-2024-07-31');
+             betaHeaders.push('extended-cache-ttl-2025-04-11');
+         }
+@@ -300,6 +472,14 @@ async function sendClaudeRequest(request, response) {
+             const generateResponseJson = await generateResponse.json();
+             const responseText = generateResponseJson?.content?.[0]?.text || '';
+             console.debug('Claude response:', generateResponseJson);
++            if (generateResponseJson?.usage) {
++                console.info('[Claude Cache Anchor] Claude usage:', {
++                    input_tokens: generateResponseJson.usage.input_tokens,
++                    cache_creation_input_tokens: generateResponseJson.usage.cache_creation_input_tokens,
++                    cache_read_input_tokens: generateResponseJson.usage.cache_read_input_tokens,
++                    cache_creation: generateResponseJson.usage.cache_creation,
++                });
++            }
+ 
+             // Wrap it back to OAI format + save the original content
+             const reply = { choices: [{ 'message': { 'content': responseText } }], content: generateResponseJson.content };
+@@ -2064,6 +2244,19 @@ router.post('/generate', function (request, response) {
+         ...bodyParams,
+     };
+ 
++    if (!isTextCompletion && Array.isArray(requestBody.messages)) {
++        const cacheTTL = getClaudeCacheTTL(request);
++        const includeTTL = cacheTTL !== '5m';
++        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL, includeTTL);
++        if (!hasManualCacheAnchor && shouldApplyClaudeCacheFallback(request, requestBody)) {
++            applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);
++        }
++        if (shouldApplyClaudeCacheFallback(request, requestBody) && !requestBody.session_id) {
++            requestBody.session_id = getClaudeCacheSessionId(request);
++            console.info(`[Claude Cache Anchor] Added session_id=${requestBody.session_id}.`);
++        }
++    }
++
+     if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
+         excludeKeysByYaml(requestBody, request.body.custom_exclude_body);
+     }
