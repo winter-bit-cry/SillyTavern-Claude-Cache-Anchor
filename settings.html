@@ -1,0 +1,76 @@
+<div class="claude_cache_anchor_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Claude Cache Anchor</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label" for="claude_cache_anchor_enabled">
+                <input id="claude_cache_anchor_enabled" type="checkbox" />
+                <span>Enable Claude cache anchor marker</span>
+            </label>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_mode">Anchor placement</label>
+                <select id="claude_cache_anchor_mode" class="text_pole">
+                    <option value="before-recent-body-window">Before recent body window</option>
+                    <option value="system-last">Last early system message</option>
+                    <option value="system-index">System message number</option>
+                    <option value="first-managed-summary">First managed summary block</option>
+                    <option value="manual-regex">First message matching regex</option>
+                </select>
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_recent_messages">Recent body messages</label>
+                <input id="claude_cache_anchor_recent_messages" class="text_pole" type="number" min="1" step="1" />
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_cache_ttl">Cache time</label>
+                <select id="claude_cache_anchor_cache_ttl" class="text_pole">
+                    <option value="1h">1 hour</option>
+                    <option value="5m">5 minutes</option>
+                </select>
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_system_index">System message number</label>
+                <input id="claude_cache_anchor_system_index" class="text_pole" type="number" min="1" step="1" />
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_summary_title">Managed summary heading</label>
+                <input id="claude_cache_anchor_summary_title" class="text_pole" type="text" maxlength="64" />
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_regex">Manual regex</label>
+                <input id="claude_cache_anchor_regex" class="text_pole" type="text" />
+            </div>
+
+            <div class="marginTop10">
+                <small>
+                    The marker is removed by the local SillyTavern backend patch before the request reaches Anthropic.
+                    Use <code>Before recent body window</code> to cache everything before the last N prompt messages.
+                </small>
+            </div>
+
+            <div class="marginTop10">
+                <strong>Current prompt</strong>
+                <div id="claude_cache_anchor_status" class="marginTop5"></div>
+            </div>
+
+            <div class="flex-container flexGap5 marginTop10">
+                <div id="claude_cache_anchor_refresh" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-rotate"></i>
+                    <small>Refresh</small>
+                </div>
+                <div id="claude_cache_anchor_restore" class="menu_button menu_button_icon">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <small>Defaults</small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
