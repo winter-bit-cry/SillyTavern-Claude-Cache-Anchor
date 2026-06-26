@@ -26,7 +26,7 @@ https://github.com/winter-bit-cry/SillyTavern-Claude-Cache-Anchor
 Then apply the backend bridge from the SillyTavern root:
 
 ```bash
-git apply data/default-user/extensions/Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
+git apply data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
 ```
 
 If your SillyTavern profile or extension folder is different, adjust the path accordingly. Restart SillyTavern after applying the patch.
@@ -73,7 +73,7 @@ This extension needs the companion local patch in `src/endpoints/backends/chat-c
 From the SillyTavern root, apply the bundled patch after installing this extension:
 
 ```bash
-git apply data/default-user/extensions/Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
+git apply data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
 ```
 
 If your extension is installed in another user profile or folder, adjust the path accordingly. Then restart SillyTavern.
