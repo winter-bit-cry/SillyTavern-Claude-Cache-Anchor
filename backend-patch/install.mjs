@@ -160,6 +160,151 @@ function ensureManualCacheAnchorCall(text) {
     throw new Error('Could not find a safe place to insert hasManualCacheAnchor.');
 }
 
+function ensureOpenAICompatibleHelpers(text) {
+    if (text.includes('function applyClaudeCacheFallbackAtRecentWindowCompatible')) {
+        return text;
+    }
+
+    const helperBlock = `
+function buildClaudeCacheControlForOpenAICompat(cacheTTL, includeTTL = true) {
+    return includeTTL
+        ? { type: 'ephemeral', ttl: cacheTTL }
+        : { type: 'ephemeral' };
+}
+
+function markClaudeCacheControlOnCompatibleMessage(message, cacheTTL, reason, includeTTL = true) {
+    if (!message || typeof message !== 'object') {
+        return false;
+    }
+
+    if (typeof message.content === 'string' && message.content.trim()) {
+        message.content = [{
+            type: 'text',
+            text: message.content,
+            cache_control: buildClaudeCacheControlForOpenAICompat(cacheTTL, includeTTL),
+        }];
+        console.info(\`[Claude Cache Anchor] Applied OpenAI-compatible fallback cache_control ttl=\${cacheTTL} to role=\${message.role || 'unknown'}, reason=\${reason}.\`);
+        return true;
+    }
+
+    if (!Array.isArray(message.content)) {
+        return false;
+    }
+
+    for (let i = message.content.length - 1; i >= 0; i--) {
+        const block = message.content[i];
+        if (!block || block.type !== 'text' || typeof block.text !== 'string' || !block.text.trim()) {
+            continue;
+        }
+
+        block.cache_control = buildClaudeCacheControlForOpenAICompat(cacheTTL, includeTTL);
+        console.info(\`[Claude Cache Anchor] Applied OpenAI-compatible fallback cache_control ttl=\${cacheTTL} to role=\${message.role || 'unknown'}, reason=\${reason}.\`);
+        return true;
+    }
+
+    return false;
+}
+
+function applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, recentMessages = ST_CLAUDE_CACHE_RECENT_MESSAGES, includeTTL = true) {
+    if (!Array.isArray(requestBody.messages) || requestBody.messages.length === 0) {
+        return false;
+    }
+
+    const targetStart = requestBody.messages.length > recentMessages
+        ? requestBody.messages.length - recentMessages - 1
+        : requestBody.messages.length - 1;
+
+    for (let i = targetStart; i >= 0; i--) {
+        if (markClaudeCacheControlOnCompatibleMessage(requestBody.messages[i], cacheTTL, \`before-last-\${recentMessages}-messages\`, includeTTL)) {
+            console.info(\`[Claude Cache Anchor] OpenAI-compatible fallback inspected messages=\${requestBody.messages.length}, targetIndex=\${i}.\`);
+            return true;
+        }
+    }
+
+    console.warn(\`[Claude Cache Anchor] OpenAI-compatible fallback found no text message to mark. messages=\${requestBody.messages.length}.\`);
+    return false;
+}
+
+`;
+
+    const insertionPattern = /function applyClaudeCacheAnchorToContentBlocks\(blocks, cacheTTL(?:, includeTTL = true)?\) \{/;
+    if (!insertionPattern.test(text)) {
+        throw new Error('Could not find helper insertion point for OpenAI-compatible fallback.');
+    }
+
+    text = text.replace(insertionPattern, match => `${helperBlock}${match}`);
+
+    const utilityInsertionPattern = /function applyClaudeCacheAnchorToContentBlocks\(blocks, cacheTTL(?:, includeTTL = true)?\) \{/;
+
+    if (!text.includes('function shouldApplyClaudeCacheFallback')) {
+        const shouldApplyBlock = `function shouldApplyClaudeCacheFallback(request, requestBody) {
+    if (!Array.isArray(requestBody?.messages)) {
+        return false;
+    }
+
+    if (![CHAT_COMPLETION_SOURCES.OPENAI, CHAT_COMPLETION_SOURCES.CUSTOM].includes(request.body.chat_completion_source)) {
+        return false;
+    }
+
+    const model = String(requestBody.model || request.body.model || '').toLowerCase();
+    const targetUrl = String(request.body.custom_url || request.body.reverse_proxy || '').toLowerCase();
+
+    return model.includes('claude')
+        || targetUrl.includes('claude')
+        || targetUrl.includes('anthropic');
+}
+
+`;
+        text = text.replace(utilityInsertionPattern, match => `${shouldApplyBlock}${match}`);
+    }
+
+    if (!text.includes('function getClaudeCacheSessionId')) {
+        const sessionIdBlock = `function getClaudeCacheSessionId(request) {
+    const source = [
+        request.body.group_names?.join('-'),
+        request.body.char_name,
+        request.body.user_name,
+        request.body.model,
+    ].filter(Boolean).join('|') || 'default';
+    return \`sillytavern-\${Buffer.from(source).toString('base64url').slice(0, 48)}\`;
+}
+
+`;
+        text = text.replace(utilityInsertionPattern, match => `${sessionIdBlock}${match}`);
+    }
+
+    return text;
+}
+
+function ensureOpenAICompatibleFallbackCall(text) {
+    if (text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);')) {
+        return text;
+    }
+
+    const block = `    if (!isTextCompletion && Array.isArray(requestBody.messages)) {
+        const cacheTTL = getClaudeCacheTTL(request);
+        const includeTTL = cacheTTL !== '5m';
+        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);
+        if (!hasManualCacheAnchor && shouldApplyClaudeCacheFallback(request, requestBody)) {
+            applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);
+        }
+        if (shouldApplyClaudeCacheFallback(request, requestBody) && !requestBody.session_id) {
+            requestBody.session_id = getClaudeCacheSessionId(request);
+            console.info(\`[Claude Cache Anchor] Added session_id=\${requestBody.session_id}.\`);
+        }
+    }
+
+`;
+
+    const insertionPoint = '    if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {';
+    const index = text.lastIndexOf(insertionPoint);
+    if (index === -1) {
+        throw new Error('Could not find OpenAI-compatible request insertion point.');
+    }
+
+    return `${text.slice(0, index)}${block}${text.slice(index)}`;
+}
+
 function install() {
     const root = findSillyTavernRoot();
     const target = path.join(root, 'src/endpoints/backends/chat-completions.js');
@@ -167,7 +312,8 @@ function install() {
 
     if (text.includes(PATCH_MARKER)
         && text.includes('function applyClaudeCacheFallbackAtRecentWindow')
-        && text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')) {
+        && text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')
+        && text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);')) {
         console.log('[Claude Cache Anchor] Backend patch is already installed.');
         return;
     }
@@ -360,6 +506,8 @@ function applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, recentMes
 
     text = ensureClaudeCacheTTL(text);
     text = ensureManualCacheAnchorCall(text);
+    text = ensureOpenAICompatibleHelpers(text);
+    text = ensureOpenAICompatibleFallbackCall(text);
 
     text = text.replace(
         /if \(enableSystemPromptCache \|\| cachingAtDepth !== -1\) \{/,
