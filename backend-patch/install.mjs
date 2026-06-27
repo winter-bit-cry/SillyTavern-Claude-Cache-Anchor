@@ -120,7 +120,24 @@ function ensureClaudeCacheTTL(text) {
 }
 
 function ensureManualCacheAnchorCall(text) {
+    const manualAnchorBlock = `        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);
+        if (!hasManualCacheAnchor) {
+            applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));
+        }
+`;
+
     if (text.includes('const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);')) {
+        if (text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')) {
+            return text;
+        }
+
+        return text.replace(
+            /        const hasManualCacheAnchor = applyClaudeCacheAnchor\(requestBody, cacheTTL\);\r?\n/,
+            manualAnchorBlock,
+        );
+    }
+
+    if (text.includes('const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL)')) {
         return text;
     }
 
@@ -128,7 +145,7 @@ function ensureManualCacheAnchorCall(text) {
     if (cachingAtDepthPattern.test(text)) {
         return text.replace(
             cachingAtDepthPattern,
-            '$1\n        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);\n',
+            `$1\n${manualAnchorBlock}`,
         );
     }
 
@@ -136,7 +153,7 @@ function ensureManualCacheAnchorCall(text) {
     if (cacheHeadersPattern.test(text)) {
         return text.replace(
             cacheHeadersPattern,
-            '\n        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);\n$1',
+            `\n${manualAnchorBlock}$1`,
         );
     }
 
@@ -148,7 +165,9 @@ function install() {
     const target = path.join(root, 'src/endpoints/backends/chat-completions.js');
     let text = fs.readFileSync(target, 'utf8');
 
-    if (text.includes(PATCH_MARKER) && text.includes('applyClaudeCacheAnchor(requestBody, cacheTTL)')) {
+    if (text.includes(PATCH_MARKER)
+        && text.includes('function applyClaudeCacheFallbackAtRecentWindow')
+        && text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')) {
         console.log('[Claude Cache Anchor] Backend patch is already installed.');
         return;
     }
@@ -159,6 +178,7 @@ function install() {
 
     const helperBlock = `
 const ST_CLAUDE_CACHE_ANCHOR = '<!-- ST_CLAUDE_CACHE_ANCHOR -->';
+const ST_CLAUDE_CACHE_RECENT_MESSAGES = 5;
 const ST_CLAUDE_CACHE_DEFAULT_TTL = '1h';
 const ST_CLAUDE_CACHE_TTLS = new Set(['5m', '1h']);
 
@@ -185,6 +205,52 @@ function getClaudeCacheTTL(request) {
 
     const configTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';
     return normalizeClaudeCacheTTL(configTTL);
+}
+
+function getClaudeCacheRecentMessages(request) {
+    const recentMessages = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentMessages ?? ''), 10);
+    return Number.isInteger(recentMessages) && recentMessages > 0
+        ? recentMessages
+        : ST_CLAUDE_CACHE_RECENT_MESSAGES;
+}
+
+function markClaudeCacheControlOnMessage(message, cacheTTL, reason) {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
+        return false;
+    }
+
+    for (let i = message.content.length - 1; i >= 0; i--) {
+        const block = message.content[i];
+        if (!block || block.type !== 'text' || typeof block.text !== 'string' || !block.text.trim()) {
+            continue;
+        }
+
+        block.cache_control = { type: 'ephemeral', ttl: cacheTTL };
+        console.info(\`[Claude Cache Anchor] Applied fallback cache_control ttl=\${cacheTTL} to role=\${message.role || 'unknown'}, reason=\${reason}.\`);
+        return true;
+    }
+
+    return false;
+}
+
+function applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, recentMessages = ST_CLAUDE_CACHE_RECENT_MESSAGES) {
+    if (!Array.isArray(requestBody.messages) || requestBody.messages.length === 0) {
+        return false;
+    }
+
+    const targetStart = requestBody.messages.length > recentMessages
+        ? requestBody.messages.length - recentMessages - 1
+        : requestBody.messages.length - 1;
+
+    for (let i = targetStart; i >= 0; i--) {
+        if (markClaudeCacheControlOnMessage(requestBody.messages[i], cacheTTL, \`before-last-\${recentMessages}-messages\`)) {
+            console.info(\`[Claude Cache Anchor] Fallback inspected messages=\${requestBody.messages.length}, targetIndex=\${i}.\`);
+            return true;
+        }
+    }
+
+    console.warn(\`[Claude Cache Anchor] Fallback found no text message to mark. messages=\${requestBody.messages.length}.\`);
+    return false;
 }
 
 function applyClaudeCacheAnchorToContentBlocks(blocks, cacheTTL) {
@@ -237,6 +303,59 @@ function applyClaudeCacheAnchor(requestBody, cacheTTL) {
             ? "const API_ELECTRONHUB = 'https://api.electronhub.ai/v1';"
             : "const API_AI21 = 'https://api.ai21.com/studio/v1';";
         text = insertAfterLine(text, helperAnchor, helperBlock);
+    }
+
+    if (text.includes(PATCH_MARKER) && !text.includes('function applyClaudeCacheFallbackAtRecentWindow')) {
+        const fallbackUpgradeBlock = `const ST_CLAUDE_CACHE_RECENT_MESSAGES = 5;
+
+function getClaudeCacheRecentMessages(request) {
+    const recentMessages = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentMessages ?? ''), 10);
+    return Number.isInteger(recentMessages) && recentMessages > 0
+        ? recentMessages
+        : ST_CLAUDE_CACHE_RECENT_MESSAGES;
+}
+
+function markClaudeCacheControlOnMessage(message, cacheTTL, reason) {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
+        return false;
+    }
+
+    for (let i = message.content.length - 1; i >= 0; i--) {
+        const block = message.content[i];
+        if (!block || block.type !== 'text' || typeof block.text !== 'string' || !block.text.trim()) {
+            continue;
+        }
+
+        block.cache_control = { type: 'ephemeral', ttl: cacheTTL };
+        console.info(\`[Claude Cache Anchor] Applied fallback cache_control ttl=\${cacheTTL} to role=\${message.role || 'unknown'}, reason=\${reason}.\`);
+        return true;
+    }
+
+    return false;
+}
+
+function applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, recentMessages = ST_CLAUDE_CACHE_RECENT_MESSAGES) {
+    if (!Array.isArray(requestBody.messages) || requestBody.messages.length === 0) {
+        return false;
+    }
+
+    const targetStart = requestBody.messages.length > recentMessages
+        ? requestBody.messages.length - recentMessages - 1
+        : requestBody.messages.length - 1;
+
+    for (let i = targetStart; i >= 0; i--) {
+        if (markClaudeCacheControlOnMessage(requestBody.messages[i], cacheTTL, \`before-last-\${recentMessages}-messages\`)) {
+            console.info(\`[Claude Cache Anchor] Fallback inspected messages=\${requestBody.messages.length}, targetIndex=\${i}.\`);
+            return true;
+        }
+    }
+
+    console.warn(\`[Claude Cache Anchor] Fallback found no text message to mark. messages=\${requestBody.messages.length}.\`);
+    return false;
+}
+
+`;
+        text = text.replace('function applyClaudeCacheAnchorToContentBlocks(blocks, cacheTTL) {', `${fallbackUpgradeBlock}function applyClaudeCacheAnchorToContentBlocks(blocks, cacheTTL) {`);
     }
 
     text = ensureClaudeCacheTTL(text);
