@@ -79,6 +79,70 @@ function replaceFirstAfter(text, startNeedle, search, replacement) {
     return `${text.slice(0, index)}${replacement}${text.slice(index + search.length)}`;
 }
 
+function ensureClaudeCacheTTL(text) {
+    const start = text.indexOf('async function sendClaudeRequest');
+    if (start === -1) {
+        throw new Error('Could not find sendClaudeRequest.');
+    }
+
+    const requestBodyIndex = text.indexOf('const requestBody =', start);
+    if (requestBodyIndex === -1) {
+        throw new Error('Could not find requestBody in sendClaudeRequest.');
+    }
+
+    const beforeRequestBody = text.slice(start, requestBodyIndex);
+    if (beforeRequestBody.includes('const cacheTTL = getClaudeCacheTTL(request);')) {
+        return text;
+    }
+
+    const cacheTTLPattern = /const cacheTTL\s*=\s*getConfigValue\(['"]claude\.extendedTTL['"],\s*false,\s*['"]boolean['"]\)\s*\?\s*['"]1h['"]\s*:\s*['"]5m['"];\r?\n?/;
+    const cacheTTLMatch = cacheTTLPattern.exec(beforeRequestBody);
+    if (cacheTTLMatch) {
+        const absoluteIndex = start + cacheTTLMatch.index;
+        return `${text.slice(0, absoluteIndex)}const cacheTTL = getClaudeCacheTTL(request);\n${text.slice(absoluteIndex + cacheTTLMatch[0].length)}`;
+    }
+
+    const insertionAnchors = [
+        /const isLimitedSampling = .*?;\r?\n/,
+        /const useWebSearch = .*?;\r?\n/,
+        /const useThinking = .*?;\r?\n/,
+    ];
+
+    for (const anchor of insertionAnchors) {
+        const match = anchor.exec(beforeRequestBody);
+        if (match) {
+            const insertAt = start + match.index + match[0].length;
+            return `${text.slice(0, insertAt)}        const cacheTTL = getClaudeCacheTTL(request);\n${text.slice(insertAt)}`;
+        }
+    }
+
+    throw new Error('Could not find a safe place to insert cacheTTL in sendClaudeRequest.');
+}
+
+function ensureManualCacheAnchorCall(text) {
+    if (text.includes('const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);')) {
+        return text;
+    }
+
+    const cachingAtDepthPattern = /(        if \(cachingAtDepth !== -1\) \{\r?\n\s+cachingAtDepthForClaude\(convertedPrompt\.messages, cachingAtDepth, cacheTTL\);\r?\n\s+\}\r?\n)/;
+    if (cachingAtDepthPattern.test(text)) {
+        return text.replace(
+            cachingAtDepthPattern,
+            '$1\n        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);\n',
+        );
+    }
+
+    const cacheHeadersPattern = /(\r?\n\s*if \(enableSystemPromptCache \|\| cachingAtDepth !== -1(?: \|\| hasManualCacheAnchor)?\) \{)/;
+    if (cacheHeadersPattern.test(text)) {
+        return text.replace(
+            cacheHeadersPattern,
+            '\n        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);\n$1',
+        );
+    }
+
+    throw new Error('Could not find a safe place to insert hasManualCacheAnchor.');
+}
+
 function install() {
     const root = findSillyTavernRoot();
     const target = path.join(root, 'src/endpoints/backends/chat-completions.js');
@@ -175,22 +239,11 @@ function applyClaudeCacheAnchor(requestBody, cacheTTL) {
         text = insertAfterLine(text, helperAnchor, helperBlock);
     }
 
-    text = replaceFirstAfter(
-        text,
-        'async function sendClaudeRequest',
-        "const cacheTTL = getConfigValue('claude.extendedTTL', false, 'boolean') ? '1h' : '5m';",
-        'const cacheTTL = getClaudeCacheTTL(request)',
-    );
-
-    if (!text.includes('const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);')) {
-        text = text.replace(
-            /(        if \(cachingAtDepth !== -1\) \{\r?\n\s+cachingAtDepthForClaude\(convertedPrompt\.messages, cachingAtDepth, cacheTTL\);\r?\n\s+\}\r?\n)/,
-            '$1\n        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);\n',
-        );
-    }
+    text = ensureClaudeCacheTTL(text);
+    text = ensureManualCacheAnchorCall(text);
 
     text = text.replace(
-        'if (enableSystemPromptCache || cachingAtDepth !== -1) {',
+        /if \(enableSystemPromptCache \|\| cachingAtDepth !== -1\) \{/,
         'if (enableSystemPromptCache || cachingAtDepth !== -1 || hasManualCacheAnchor) {',
     );
 
