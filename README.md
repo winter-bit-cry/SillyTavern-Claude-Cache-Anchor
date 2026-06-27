@@ -23,13 +23,13 @@ Install the extension in SillyTavern using this Git URL:
 https://github.com/winter-bit-cry/SillyTavern-Claude-Cache-Anchor
 ```
 
-Then apply the backend bridge from the SillyTavern root:
+Then install the backend bridge from the SillyTavern root:
 
 ```bash
-git apply data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
+node data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/install.mjs
 ```
 
-If your SillyTavern profile or extension folder is different, adjust the path accordingly. Restart SillyTavern after applying the patch.
+If your SillyTavern profile or extension folder is different, adjust the path accordingly. Restart SillyTavern after installing the backend bridge.
 
 ## Recommended setup
 
@@ -70,10 +70,10 @@ The first request should usually show creation. A later request with the same ca
 
 This extension needs the companion local patch in `src/endpoints/backends/chat-completions.js`.
 
-From the SillyTavern root, apply the bundled patch after installing this extension:
+From the SillyTavern root, run the bundled installer after installing this extension:
 
 ```bash
-git apply data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/sillytavern-chat-completions.patch
+node data/default-user/extensions/SillyTavern-Claude-Cache-Anchor/backend-patch/install.mjs
 ```
 
 If your extension is installed in another user profile or folder, adjust the path accordingly. Then restart SillyTavern.
