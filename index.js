@@ -14,6 +14,14 @@ const MODULE_NAME = (() => {
 
 const ANCHOR_MARKER = '<!-- ST_CLAUDE_CACHE_ANCHOR -->';
 const CACHE_TTL_OPTIONS = ['1h', '5m'];
+const MODE_OPTIONS = [
+    'before-recent-body-window',
+    'before-recent-body-rounds',
+    'system-last',
+    'system-index',
+    'first-managed-summary',
+    'manual-regex',
+];
 
 console.info('[Claude Cache Anchor] Script loaded.');
 
@@ -21,6 +29,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     mode: 'before-recent-body-window',
     recentMessages: 5,
+    recentRounds: 5,
     cacheTTL: '1h',
     systemIndex: 1,
     summaryTitle: '摘要',
@@ -44,12 +53,15 @@ function getSettings() {
         }
     }
 
-    if (!['before-recent-body-window', 'system-last', 'system-index', 'first-managed-summary', 'manual-regex'].includes(settings.mode)) {
+    if (!MODE_OPTIONS.includes(settings.mode)) {
         settings.mode = DEFAULT_SETTINGS.mode;
     }
 
     const parsedRecentMessages = Number.parseInt(String(settings.recentMessages ?? ''), 10);
     settings.recentMessages = Number.isInteger(parsedRecentMessages) && parsedRecentMessages > 0 ? parsedRecentMessages : DEFAULT_SETTINGS.recentMessages;
+
+    const parsedRecentRounds = Number.parseInt(String(settings.recentRounds ?? ''), 10);
+    settings.recentRounds = Number.isInteger(parsedRecentRounds) && parsedRecentRounds > 0 ? parsedRecentRounds : DEFAULT_SETTINGS.recentRounds;
     settings.cacheTTL = normalizeCacheTTL(settings.cacheTTL);
 
     const parsedSystemIndex = Number.parseInt(String(settings.systemIndex ?? ''), 10);
@@ -202,6 +214,13 @@ function findBeforeRecentBodyWindowIndex(chat, recentMessages) {
     return findLastEarlySystemIndex(chat);
 }
 
+function findBeforeRecentBodyRoundsIndex(chat, recentRounds) {
+    const normalizedRecentRounds = Number.isInteger(recentRounds) && recentRounds > 0
+        ? recentRounds
+        : DEFAULT_SETTINGS.recentRounds;
+    return findBeforeRecentBodyWindowIndex(chat, normalizedRecentRounds * 2);
+}
+
 function findSystemNumberIndex(chat, systemNumber) {
     let seen = 0;
     for (let i = 0; i < chat.length; i++) {
@@ -256,6 +275,8 @@ function findAnchorIndex(chat, settings) {
     switch (settings.mode) {
         case 'before-recent-body-window':
             return findBeforeRecentBodyWindowIndex(chat, settings.recentMessages);
+        case 'before-recent-body-rounds':
+            return findBeforeRecentBodyRoundsIndex(chat, settings.recentRounds);
         case 'system-index':
             return findSystemNumberIndex(chat, settings.systemIndex);
         case 'first-managed-summary':
@@ -310,6 +331,8 @@ function analyzeCurrentPrompt() {
     const index = findAnchorIndex(chat, settings);
     const windowText = settings.mode === 'before-recent-body-window'
         ? ` recentMessages=${settings.recentMessages}.`
+        : settings.mode === 'before-recent-body-rounds'
+            ? ` recentRounds=${settings.recentRounds}.`
         : '';
     return `[${settings.enabled ? 'enabled' : 'disabled'}] mode=${settings.mode}.${windowText} cacheTTL=${settings.cacheTTL}. ${describeIndex(index, chat)}`;
 }
@@ -328,6 +351,7 @@ function syncSettingsUi() {
     $('#claude_cache_anchor_enabled').prop('checked', !!settings.enabled);
     $('#claude_cache_anchor_mode').val(settings.mode);
     $('#claude_cache_anchor_recent_messages').val(settings.recentMessages);
+    $('#claude_cache_anchor_recent_rounds').val(settings.recentRounds);
     $('#claude_cache_anchor_cache_ttl').val(settings.cacheTTL);
     $('#claude_cache_anchor_system_index').val(settings.systemIndex);
     $('#claude_cache_anchor_summary_title').val(settings.summaryTitle);
@@ -360,7 +384,7 @@ function registerSlashCommands() {
 
             if (args.mode !== undefined && args.mode !== '') {
                 const mode = String(args.mode);
-                if (['before-recent-body-window', 'system-last', 'system-index', 'first-managed-summary', 'manual-regex'].includes(mode)) {
+                if (MODE_OPTIONS.includes(mode)) {
                     settings.mode = mode;
                 }
             }
@@ -369,6 +393,13 @@ function registerSlashCommands() {
                 const parsedValue = Number.parseInt(String(args.recentMessages), 10);
                 if (Number.isInteger(parsedValue) && parsedValue > 0) {
                     settings.recentMessages = parsedValue;
+                }
+            }
+
+            if (args.recentRounds !== undefined && args.recentRounds !== '') {
+                const parsedValue = Number.parseInt(String(args.recentRounds), 10);
+                if (Number.isInteger(parsedValue) && parsedValue > 0) {
+                    settings.recentRounds = parsedValue;
                 }
             }
 
@@ -407,11 +438,17 @@ function registerSlashCommands() {
                 description: 'anchor mode',
                 typeList: [ARGUMENT_TYPE.STRING],
                 defaultValue: '',
-                enumList: ['before-recent-body-window', 'system-last', 'system-index', 'first-managed-summary', 'manual-regex'],
+                enumList: MODE_OPTIONS,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'recentMessages',
                 description: 'number of newest prompt messages to keep after the anchor',
+                typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.STRING],
+                defaultValue: '',
+            }),
+            SlashCommandNamedArgument.fromProps({
+                name: 'recentRounds',
+                description: 'number of newest user/assistant rounds to keep after the anchor',
                 typeList: [ARGUMENT_TYPE.NUMBER, ARGUMENT_TYPE.STRING],
                 defaultValue: '',
             }),
@@ -471,6 +508,14 @@ async function addSettingsUi() {
         const parsedValue = Number.parseInt(String($('#claude_cache_anchor_recent_messages').val()), 10);
         settings.recentMessages = Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : DEFAULT_SETTINGS.recentMessages;
         $('#claude_cache_anchor_recent_messages').val(settings.recentMessages);
+        saveSettings();
+    });
+
+    $('#claude_cache_anchor_recent_rounds').on('change', () => {
+        const settings = getSettings();
+        const parsedValue = Number.parseInt(String($('#claude_cache_anchor_recent_rounds').val()), 10);
+        settings.recentRounds = Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : DEFAULT_SETTINGS.recentRounds;
+        $('#claude_cache_anchor_recent_rounds').val(settings.recentRounds);
         saveSettings();
     });
 

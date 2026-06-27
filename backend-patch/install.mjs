@@ -122,17 +122,17 @@ function ensureClaudeCacheTTL(text) {
 function ensureManualCacheAnchorCall(text) {
     const manualAnchorBlock = `        const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);
         if (!hasManualCacheAnchor) {
-            applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));
+            applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request));
         }
 `;
 
     if (text.includes('const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);')) {
-        if (text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')) {
+        if (text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request));')) {
             return text;
         }
 
         return text.replace(
-            /        const hasManualCacheAnchor = applyClaudeCacheAnchor\(requestBody, cacheTTL\);\r?\n/,
+            /        const hasManualCacheAnchor = applyClaudeCacheAnchor\(requestBody, cacheTTL\);\r?\n(?:        if \(!hasManualCacheAnchor\) \{\r?\n\s*applyClaudeCacheFallbackAtRecentWindow\(requestBody, cacheTTL, getClaudeCacheRecentMessages\(request\)\);\r?\n\s*\}\r?\n)?/,
             manualAnchorBlock,
         );
     }
@@ -158,6 +158,36 @@ function ensureManualCacheAnchorCall(text) {
     }
 
     throw new Error('Could not find a safe place to insert hasManualCacheAnchor.');
+}
+
+function ensureRecentWindowHelpers(text) {
+    if (text.includes('function getClaudeCacheRecentWindowSize')) {
+        return text;
+    }
+
+    const helperBlock = `
+function getClaudeCacheRecentRounds(request) {
+    const recentRounds = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentRounds ?? ''), 10);
+    return Number.isInteger(recentRounds) && recentRounds > 0
+        ? recentRounds
+        : Math.ceil(ST_CLAUDE_CACHE_RECENT_MESSAGES / 2);
+}
+
+function getClaudeCacheRecentWindowSize(request) {
+    const settings = readClaudeCacheAnchorSettings(request);
+    return settings.mode === 'before-recent-body-rounds'
+        ? getClaudeCacheRecentRounds(request) * 2
+        : getClaudeCacheRecentMessages(request);
+}
+`;
+
+    const anchorPattern = /function getClaudeCacheRecentMessages\(request\) \{\r?\n\s*const recentMessages = Number\.parseInt\(String\(readClaudeCacheAnchorSettings\(request\)\.recentMessages \?\? ''\), 10\);\r?\n\s*return Number\.isInteger\(recentMessages\) && recentMessages > 0\r?\n\s*\? recentMessages\r?\n\s*: ST_CLAUDE_CACHE_RECENT_MESSAGES;\r?\n\}\r?\n/;
+
+    if (!anchorPattern.test(text)) {
+        throw new Error('Could not find getClaudeCacheRecentMessages for recent window helper upgrade.');
+    }
+
+    return text.replace(anchorPattern, match => `${match}${helperBlock}`);
 }
 
 function ensureOpenAICompatibleHelpers(text) {
@@ -277,8 +307,15 @@ function applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL,
 }
 
 function ensureOpenAICompatibleFallbackCall(text) {
-    if (text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);')) {
+    if (text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request), includeTTL);')) {
         return text;
+    }
+
+    if (text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);')) {
+        return text.replaceAll(
+            'applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);',
+            'applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request), includeTTL);',
+        );
     }
 
     const block = `    if (!isTextCompletion && Array.isArray(requestBody.messages)) {
@@ -286,7 +323,7 @@ function ensureOpenAICompatibleFallbackCall(text) {
         const includeTTL = cacheTTL !== '5m';
         const hasManualCacheAnchor = applyClaudeCacheAnchor(requestBody, cacheTTL);
         if (!hasManualCacheAnchor && shouldApplyClaudeCacheFallback(request, requestBody)) {
-            applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);
+            applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request), includeTTL);
         }
         if (shouldApplyClaudeCacheFallback(request, requestBody) && !requestBody.session_id) {
             requestBody.session_id = getClaudeCacheSessionId(request);
@@ -312,8 +349,9 @@ function install() {
 
     if (text.includes(PATCH_MARKER)
         && text.includes('function applyClaudeCacheFallbackAtRecentWindow')
-        && text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentMessages(request));')
-        && text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentMessages(request), includeTTL);')) {
+        && text.includes('function getClaudeCacheRecentWindowSize')
+        && text.includes('applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request));')
+        && text.includes('applyClaudeCacheFallbackAtRecentWindowCompatible(requestBody, cacheTTL, getClaudeCacheRecentWindowSize(request), includeTTL);')) {
         console.log('[Claude Cache Anchor] Backend patch is already installed.');
         return;
     }
@@ -358,6 +396,20 @@ function getClaudeCacheRecentMessages(request) {
     return Number.isInteger(recentMessages) && recentMessages > 0
         ? recentMessages
         : ST_CLAUDE_CACHE_RECENT_MESSAGES;
+}
+
+function getClaudeCacheRecentRounds(request) {
+    const recentRounds = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentRounds ?? ''), 10);
+    return Number.isInteger(recentRounds) && recentRounds > 0
+        ? recentRounds
+        : Math.ceil(ST_CLAUDE_CACHE_RECENT_MESSAGES / 2);
+}
+
+function getClaudeCacheRecentWindowSize(request) {
+    const settings = readClaudeCacheAnchorSettings(request);
+    return settings.mode === 'before-recent-body-rounds'
+        ? getClaudeCacheRecentRounds(request) * 2
+        : getClaudeCacheRecentMessages(request);
 }
 
 function markClaudeCacheControlOnMessage(message, cacheTTL, reason) {
@@ -461,6 +513,20 @@ function getClaudeCacheRecentMessages(request) {
         : ST_CLAUDE_CACHE_RECENT_MESSAGES;
 }
 
+function getClaudeCacheRecentRounds(request) {
+    const recentRounds = Number.parseInt(String(readClaudeCacheAnchorSettings(request).recentRounds ?? ''), 10);
+    return Number.isInteger(recentRounds) && recentRounds > 0
+        ? recentRounds
+        : Math.ceil(ST_CLAUDE_CACHE_RECENT_MESSAGES / 2);
+}
+
+function getClaudeCacheRecentWindowSize(request) {
+    const settings = readClaudeCacheAnchorSettings(request);
+    return settings.mode === 'before-recent-body-rounds'
+        ? getClaudeCacheRecentRounds(request) * 2
+        : getClaudeCacheRecentMessages(request);
+}
+
 function markClaudeCacheControlOnMessage(message, cacheTTL, reason) {
     if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
         return false;
@@ -505,6 +571,7 @@ function applyClaudeCacheFallbackAtRecentWindow(requestBody, cacheTTL, recentMes
     }
 
     text = ensureClaudeCacheTTL(text);
+    text = ensureRecentWindowHelpers(text);
     text = ensureManualCacheAnchorCall(text);
     text = ensureOpenAICompatibleHelpers(text);
     text = ensureOpenAICompatibleFallbackCall(text);

@@ -14,6 +14,7 @@
                 <label for="claude_cache_anchor_mode">Anchor placement</label>
                 <select id="claude_cache_anchor_mode" class="text_pole">
                     <option value="before-recent-body-window">Before recent body window</option>
+                    <option value="before-recent-body-rounds">Before recent body rounds</option>
                     <option value="system-last">Last early system message</option>
                     <option value="system-index">System message number</option>
                     <option value="first-managed-summary">First managed summary block</option>
@@ -24,6 +25,11 @@
             <div class="marginTop10">
                 <label for="claude_cache_anchor_recent_messages">Recent body messages</label>
                 <input id="claude_cache_anchor_recent_messages" class="text_pole" type="number" min="1" step="1" />
+            </div>
+
+            <div class="marginTop10">
+                <label for="claude_cache_anchor_recent_rounds">Recent body rounds</label>
+                <input id="claude_cache_anchor_recent_rounds" class="text_pole" type="number" min="1" step="1" />
             </div>
 
             <div class="marginTop10">
@@ -52,7 +58,7 @@
             <div class="marginTop10">
                 <small>
                     The marker is removed by the local SillyTavern backend patch before the request reaches Anthropic.
-                    Use <code>Before recent body window</code> to cache everything before the last N prompt messages.
+                    Use <code>Before recent body rounds</code> when old chat is stored as user-summary / assistant-summary pairs.
                 </small>
             </div>
 
